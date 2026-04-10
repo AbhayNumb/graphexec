@@ -42,6 +42,7 @@ function skillToForm(s) {
     return {
       id: s.id,
       type: s.type,
+      
       description: s.description || "",
       inputVars,
       outputVars,
