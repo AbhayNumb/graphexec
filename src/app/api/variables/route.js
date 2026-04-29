@@ -63,3 +63,40 @@ export async function DELETE(request) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+
+export async function PATCH(request) {
+  try {
+    const { name, data_type, default_value, description } = await request.json();
+
+    if (!name || !data_type) {
+      return NextResponse.json(
+        { error: "name and data_type are required" },
+        { status: 400 }
+      );
+    }
+
+    if (name.startsWith("SECRET_")) {
+      return NextResponse.json(
+        { error: "Variables starting with SECRET_ are not allowed" },
+        { status: 400 }
+      );
+    }
+
+    const result = await pool.query(
+      `UPDATE variables
+       SET data_type = $3, default_value = $4, description = $5
+       WHERE graph_id = $1 AND name = $2
+       RETURNING id, name, kind, data_type, default_value, description, created_at`,
+      [GRAPH_ID, name, data_type, default_value ?? null, description ?? null]
+    );
+
+    if (result.rowCount === 0) {
+      return NextResponse.json({ error: "Variable not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(result.rows[0]);
+  } catch (err) {
+    console.error("PATCH /api/variables error:", err);
+    return NextResponse.json({ error: err.detail || err.message }, { status: 400 });
+  }
+}

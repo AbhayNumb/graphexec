@@ -1,24 +1,6 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 
-/**
- * Recursively strip SQL-escaped single quotes ('') from all string values.
- * Users writing raw JSON should use plain ' — the '' doubling is only for
- * SQL string literals and must never appear in stored JSONB data.
- */
-function stripSqlQuoteEscaping(obj) {
-  if (typeof obj === "string") return obj.replace(/''/g, "'");
-  if (Array.isArray(obj)) return obj.map(stripSqlQuoteEscaping);
-  if (obj !== null && typeof obj === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(obj)) {
-      out[k] = stripSqlQuoteEscaping(v);
-    }
-    return out;
-  }
-  return obj;
-}
-
 export async function GET() {
   try {
     const result = await pool.query(
@@ -42,13 +24,11 @@ export async function POST(request) {
       );
     }
 
-    const sanitizedConfig = stripSqlQuoteEscaping(config ?? {});
-
     const result = await pool.query(
       `INSERT INTO skills (id, type, config, code, description)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, type, config, code, description, created_at`,
-      [id, type, sanitizedConfig, code ?? null, description ?? null]
+      [id, type, config ?? {}, code ?? null, description ?? null]
     );
 
     return NextResponse.json(result.rows[0], { status: 201 });
@@ -73,13 +53,11 @@ export async function PATCH(request) {
       );
     }
 
-    const sanitizedConfig = stripSqlQuoteEscaping(config ?? {});
-
     const result = await pool.query(
       `UPDATE skills SET type = $2, config = $3, code = $4, description = $5
        WHERE id = $1
        RETURNING id, type, config, code, description, created_at`,
-      [id, type, sanitizedConfig, code ?? null, description ?? null]
+      [id, type, config ?? {}, code ?? null, description ?? null]
     );
 
     if (result.rowCount === 0) {

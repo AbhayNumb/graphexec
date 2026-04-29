@@ -18,7 +18,7 @@ const TYPE_LABELS = {
   transform: "Transform",
 };
 
-export default function NodeSkillPanel({ nodeId, nodeLabel, onClose }) {
+export default function NodeSkillPanel({ nodeId, nodeLabel, onClose, onMutated }) {
   const [nodeSkills, setNodeSkills] = useState([]);
   const [allSkills, setAllSkills] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -63,6 +63,7 @@ export default function NodeSkillPanel({ nodeId, nodeLabel, onClose }) {
         const row = await res.json();
         setNodeSkills((prev) => [...prev, row]);
         setSelectedSkill("");
+        if (onMutated) await onMutated();
       }
     } finally {
       setAdding(false);
@@ -77,6 +78,7 @@ export default function NodeSkillPanel({ nodeId, nodeLabel, onClose }) {
     });
     if (res.ok) {
       setNodeSkills((prev) => prev.filter((ns) => ns.id !== id));
+      if (onMutated) await onMutated();
     }
   };
 
@@ -105,6 +107,7 @@ export default function NodeSkillPanel({ nodeId, nodeLabel, onClose }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ node_id: nodeId, ordered_ids: orderedIds }),
     });
+    if (onMutated) await onMutated();
   };
 
   const assignedSkillIds = new Set(nodeSkills.map((ns) => ns.skill_id));

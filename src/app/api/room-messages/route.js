@@ -41,6 +41,7 @@ async function callOrchestrator(userMessage) {
     currentChatBookingId:
       process.env.CHAT_BOOKING_ID || DEFAULT_CHAT_BOOKING_ID,
   };
+  console.log("body", body);
 
   const res = await fetch(url, {
     method: "POST",
@@ -50,7 +51,7 @@ async function callOrchestrator(userMessage) {
     },
     body: JSON.stringify(body),
   });
-
+  console.log("res", res);
   const text = await res.text();
 
   if (!res.ok) {

@@ -15,6 +15,7 @@ export default function Variables() {
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState("");
   const [adding, setAdding] = useState(false);
+  const [editingName, setEditingName] = useState(null);
 
   const fetchVars = useCallback(() => {
     fetch("/api/variables")
@@ -61,11 +62,10 @@ export default function Variables() {
 
     try {
       const res = await fetch("/api/variables", {
-        method: "POST",
+        method: editingName ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: form.name.trim(),
-          kind: "normal",
+          name: editingName || form.name.trim(),
           data_type: form.data_type,
           default_value: form.default_value || null,
           description: form.description || null,
@@ -74,11 +74,12 @@ export default function Variables() {
 
       if (!res.ok) {
         const data = await res.json();
-        setError(data.error || "Failed to create variable");
+        setError(data.error || (editingName ? "Failed to update variable" : "Failed to create variable"));
         return;
       }
 
       setForm(EMPTY_FORM);
+      setEditingName(null);
       fetchVars();
     } catch {
       setError("Network error");
@@ -95,7 +96,29 @@ export default function Variables() {
     });
     if (res.ok) {
       setVariables((prev) => prev.filter((v) => v.name !== name));
+      if (editingName === name) {
+        setEditingName(null);
+        setForm(EMPTY_FORM);
+      }
     }
+  };
+
+  const handleEdit = (v) => {
+    setError("");
+    setForm({
+      name: v.name || "",
+      data_type: v.data_type || "TEXT",
+      default_value: v.default_value == null ? "" : String(v.default_value),
+      description: v.description || "",
+    });
+    setEditingName(v.name);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleCancelEdit = () => {
+    setForm(EMPTY_FORM);
+    setEditingName(null);
+    setError("");
   };
 
   if (loading) {
@@ -112,6 +135,16 @@ export default function Variables() {
       </div>
 
       <form className="var-form" onSubmit={handleSubmit}>
+        {editingName && (
+          <div className="sk-editing-banner">
+            <span>
+              Editing <code className="sk-inline-code">{editingName}</code>
+            </span>
+            <button type="button" className="sk-btn sk-btn-secondary" onClick={handleCancelEdit}>
+              Cancel
+            </button>
+          </div>
+        )}
         <div className="var-form-row">
           <div className="var-field">
             <label>Name</label>
@@ -120,15 +153,22 @@ export default function Variables() {
               value={form.name}
               onChange={handleChange}
               placeholder="my_variable"
+              readOnly={!!editingName}
+              className={editingName ? "sk-input-readonly" : undefined}
             />
           </div>
 
           <div className="var-field">
             <label>Type</label>
-            <select name="data_type" value={form.data_type} onChange={(e) => {
-              setForm((prev) => ({ ...prev, data_type: e.target.value, default_value: "" }));
-              setError("");
-            }}>
+            <select
+              name="data_type"
+              value={form.data_type}
+              disabled={!!editingName}
+              onChange={(e) => {
+                setForm((prev) => ({ ...prev, data_type: e.target.value, default_value: "" }));
+                setError("");
+              }}
+            >
               <option value="TEXT">Text</option>
               <option value="BOOLEAN">Boolean</option>
               <option value="JSON">JSON</option>
@@ -178,7 +218,7 @@ export default function Variables() {
         {error && <div className="var-error">{error}</div>}
 
         <button type="submit" className="var-btn" disabled={adding}>
-          {adding ? "Adding..." : "Add Variable"}
+          {adding ? (editingName ? "Saving..." : "Adding...") : editingName ? "Save changes" : "Add Variable"}
         </button>
       </form>
 
@@ -212,16 +252,28 @@ export default function Variables() {
                 </td>
                 <td className="var-desc-cell">{v.description || "—"}</td>
                 <td>
-                  <button
-                    className="var-delete-btn"
-                    onClick={() => handleDelete(v.name)}
-                    title="Delete variable"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="3 6 5 6 21 6" />
-                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    </svg>
-                  </button>
+                  <div className="var-actions">
+                    <button
+                      className="var-edit-btn"
+                      onClick={() => handleEdit(v)}
+                      title="Edit variable"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                    </button>
+                    <button
+                      className="var-delete-btn"
+                      onClick={() => handleDelete(v.name)}
+                      title="Delete variable"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

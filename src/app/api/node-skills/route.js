@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import pool from "@/lib/db";
 import { GRAPH_ID } from "@/lib/constants";
+import { recordHistory } from "@/lib/graphHistory";
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -29,6 +30,7 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  const client = await pool.connect();
   try {
     const { node_id, skill_id } = await request.json();
 
@@ -39,20 +41,49 @@ export async function POST(request) {
       );
     }
 
-    const maxOrder = await pool.query(
+    await client.query("BEGIN");
+    const beforeResult = await client.query(
+      `SELECT id, node_id, skill_id, execution_order, config_override, created_at
+       FROM node_skills
+       WHERE graph_id = $1 AND node_id = $2
+       ORDER BY execution_order ASC`,
+      [GRAPH_ID, node_id]
+    );
+
+    const maxOrder = await client.query(
       "SELECT COALESCE(MAX(execution_order), 0) AS max_order FROM node_skills WHERE graph_id = $1 AND node_id = $2",
       [GRAPH_ID, node_id]
     );
     const nextOrder = maxOrder.rows[0].max_order + 1;
 
-    const result = await pool.query(
+    const result = await client.query(
       `INSERT INTO node_skills (graph_id, node_id, skill_id, execution_order)
        VALUES ($1, $2, $3, $4)
        RETURNING id, skill_id, execution_order, config_override`,
       [GRAPH_ID, node_id, skill_id, nextOrder]
     );
 
-    const skill = await pool.query("SELECT type, description, config FROM skills WHERE id = $1", [skill_id]);
+    const afterResult = await client.query(
+      `SELECT id, node_id, skill_id, execution_order, config_override, created_at
+       FROM node_skills
+       WHERE graph_id = $1 AND node_id = $2
+       ORDER BY execution_order ASC`,
+      [GRAPH_ID, node_id]
+    );
+
+    await recordHistory(client, {
+      actionType: "node_skills_replace",
+      targetKind: "skill_link",
+      targetId: node_id,
+      beforeState: { node_id, skills: beforeResult.rows },
+      afterState: { node_id, skills: afterResult.rows },
+    });
+    await client.query("COMMIT");
+
+    const skill = await client.query(
+      "SELECT type, description, config FROM skills WHERE id = $1",
+      [skill_id]
+    );
     const row = {
       ...result.rows[0],
       skill_type: skill.rows[0]?.type,
@@ -62,40 +93,73 @@ export async function POST(request) {
 
     return NextResponse.json(row, { status: 201 });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("POST /api/node-skills error:", err);
     const msg = err.code === "23505" ? "Skill already assigned at that order" : err.message;
     return NextResponse.json({ error: msg }, { status: 400 });
+  } finally {
+    client.release();
   }
 }
 
 export async function DELETE(request) {
+  const client = await pool.connect();
   try {
     const { id, node_id } = await request.json();
+    await client.query("BEGIN");
 
-    await pool.query(
+    const beforeResult = await client.query(
+      `SELECT id, node_id, skill_id, execution_order, config_override, created_at
+       FROM node_skills
+       WHERE graph_id = $1 AND node_id = $2
+       ORDER BY execution_order ASC`,
+      [GRAPH_ID, node_id]
+    );
+
+    await client.query(
       "DELETE FROM node_skills WHERE id = $1 AND graph_id = $2",
       [id, GRAPH_ID]
     );
 
-    const remaining = await pool.query(
+    const remaining = await client.query(
       "SELECT id FROM node_skills WHERE graph_id = $1 AND node_id = $2 ORDER BY execution_order ASC",
       [GRAPH_ID, node_id]
     );
     for (let i = 0; i < remaining.rows.length; i++) {
-      await pool.query(
+      await client.query(
         "UPDATE node_skills SET execution_order = $1 WHERE id = $2",
         [i + 1, remaining.rows[i].id]
       );
     }
 
+    const afterResult = await client.query(
+      `SELECT id, node_id, skill_id, execution_order, config_override, created_at
+       FROM node_skills
+       WHERE graph_id = $1 AND node_id = $2
+       ORDER BY execution_order ASC`,
+      [GRAPH_ID, node_id]
+    );
+
+    await recordHistory(client, {
+      actionType: "node_skills_replace",
+      targetKind: "skill_link",
+      targetId: node_id,
+      beforeState: { node_id, skills: beforeResult.rows },
+      afterState: { node_id, skills: afterResult.rows },
+    });
+    await client.query("COMMIT");
     return NextResponse.json({ deleted: id });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("DELETE /api/node-skills error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });
+  } finally {
+    client.release();
   }
 }
 
 export async function PATCH(request) {
+  const client = await pool.connect();
   try {
     const { node_id, ordered_ids } = await request.json();
 
@@ -106,16 +170,43 @@ export async function PATCH(request) {
       );
     }
 
+    await client.query("BEGIN");
+    const beforeResult = await client.query(
+      `SELECT id, node_id, skill_id, execution_order, config_override, created_at
+       FROM node_skills
+       WHERE graph_id = $1 AND node_id = $2
+       ORDER BY execution_order ASC`,
+      [GRAPH_ID, node_id]
+    );
+
     for (let i = 0; i < ordered_ids.length; i++) {
-      await pool.query(
+      await client.query(
         "UPDATE node_skills SET execution_order = $1 WHERE id = $2 AND graph_id = $3 AND node_id = $4",
         [i + 1, ordered_ids[i], GRAPH_ID, node_id]
       );
     }
 
+    const afterResult = await client.query(
+      `SELECT id, node_id, skill_id, execution_order, config_override, created_at
+       FROM node_skills
+       WHERE graph_id = $1 AND node_id = $2
+       ORDER BY execution_order ASC`,
+      [GRAPH_ID, node_id]
+    );
+    await recordHistory(client, {
+      actionType: "node_skills_replace",
+      targetKind: "skill_link",
+      targetId: node_id,
+      beforeState: { node_id, skills: beforeResult.rows },
+      afterState: { node_id, skills: afterResult.rows },
+    });
+    await client.query("COMMIT");
     return NextResponse.json({ reordered: true });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("PATCH /api/node-skills error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });
+  } finally {
+    client.release();
   }
 }

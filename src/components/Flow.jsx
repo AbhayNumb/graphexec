@@ -39,22 +39,101 @@ function AddNodePanel({ onCreateAt }) {
   );
 }
 
+function HistoryPanel({ canUndo, canRedo, busy, onUndo, onRedo, onClear }) {
+  return (
+    <Panel position="top-left" className="graph-history-panel">
+      <button
+        type="button"
+        className="graph-history-btn"
+        onClick={onUndo}
+        disabled={!canUndo || busy}
+        title="Undo (Ctrl/Cmd+Z)"
+      >
+        Undo
+      </button>
+      <button
+        type="button"
+        className="graph-history-btn"
+        onClick={onRedo}
+        disabled={!canRedo || busy}
+        title="Redo (Ctrl/Cmd+Shift+Z or Ctrl+Y)"
+      >
+        Redo
+      </button>
+      <button
+        type="button"
+        className="graph-history-btn graph-history-btn-clear"
+        onClick={onClear}
+        disabled={busy || (!canUndo && !canRedo)}
+        title="Clear undo/redo history"
+        aria-label="Clear undo/redo history"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2" />
+          <path d="M19 6l-1 14H6L5 6" />
+          <path d="M10 11v6" />
+          <path d="M14 11v6" />
+        </svg>
+      </button>
+    </Panel>
+  );
+}
+
 export default function Flow() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [loading, setLoading] = useState(true);
   const [selectedNode, setSelectedNode] = useState(null);
   const [selectedEdge, setSelectedEdge] = useState(null);
+  const [historyState, setHistoryState] = useState({
+    canUndo: false,
+    canRedo: false,
+  });
+  const [historyBusy, setHistoryBusy] = useState(false);
+
+  const refreshHistoryState = useCallback(async () => {
+    const res = await fetch("/api/graph/history");
+    if (!res.ok) return;
+    const state = await res.json();
+    setHistoryState({
+      canUndo: Boolean(state.canUndo),
+      canRedo: Boolean(state.canRedo),
+    });
+  }, []);
+
+  const loadGraph = useCallback(async () => {
+    const [graphRes, historyRes] = await Promise.all([
+      fetch("/api/graph"),
+      fetch("/api/graph/history"),
+    ]);
+    if (graphRes.ok) {
+      const data = await graphRes.json();
+      setNodes(data.nodes || []);
+      setEdges(data.edges || []);
+    }
+    if (historyRes.ok) {
+      const state = await historyRes.json();
+      setHistoryState({
+        canUndo: Boolean(state.canUndo),
+        canRedo: Boolean(state.canRedo),
+      });
+    }
+  }, [setEdges, setNodes]);
 
   useEffect(() => {
-    fetch("/api/graph")
-      .then((res) => res.json())
-      .then((data) => {
-        setNodes(data.nodes);
-        setEdges(data.edges);
-      })
-      .finally(() => setLoading(false));
-  }, []);
+    loadGraph().finally(() => setLoading(false));
+  }, [loadGraph]);
 
   const onConnect = useCallback(
     async (connection) => {
@@ -77,8 +156,9 @@ export default function Flow() {
           data: {},
         }),
       });
+      await refreshHistoryState();
     },
-    [setEdges]
+    [refreshHistoryState, setEdges]
   );
 
   const onNodesDelete = useCallback(
@@ -98,10 +178,11 @@ export default function Flow() {
               (e) => !deleted.includes(e.source) && !deleted.includes(e.target)
             )
           );
+          await refreshHistoryState();
         }
       }
     },
-    [setNodes, setEdges]
+    [refreshHistoryState, setNodes, setEdges]
   );
 
   const onEdgesDelete = useCallback(
@@ -116,8 +197,9 @@ export default function Flow() {
           }),
         });
       }
+      await refreshHistoryState();
     },
-    []
+    [refreshHistoryState]
   );
 
   const createNodeAtPosition = useCallback(
@@ -136,9 +218,10 @@ export default function Flow() {
       if (res.ok) {
         const node = await res.json();
         setNodes((prev) => [...prev, node]);
+        await refreshHistoryState();
       }
     },
-    [setNodes]
+    [refreshHistoryState, setNodes]
   );
 
   const onNodeClick = useCallback((event, node) => {
@@ -157,7 +240,7 @@ export default function Flow() {
   }, []);
 
   const handleEdgeSaved = useCallback(
-    (updated) => {
+    async (updated) => {
       setEdges((eds) =>
         eds.map((e) =>
           e.id === updated.id
@@ -169,8 +252,9 @@ export default function Flow() {
             : e
         )
       );
+      await refreshHistoryState();
     },
-    [setEdges]
+    [refreshHistoryState, setEdges]
   );
 
   const persistNodePositions = useCallback(async (toSave) => {
@@ -186,7 +270,83 @@ export default function Flow() {
         })
       )
     );
-  }, []);
+    await refreshHistoryState();
+  }, [refreshHistoryState]);
+
+  const performUndo = useCallback(async () => {
+    if (!historyState.canUndo || historyBusy) return;
+    setHistoryBusy(true);
+    try {
+      const res = await fetch("/api/graph/undo", { method: "POST" });
+      if (!res.ok) return;
+      await loadGraph();
+      setSelectedNode(null);
+      setSelectedEdge(null);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }, [historyBusy, historyState.canUndo, loadGraph]);
+
+  const performRedo = useCallback(async () => {
+    if (!historyState.canRedo || historyBusy) return;
+    setHistoryBusy(true);
+    try {
+      const res = await fetch("/api/graph/redo", { method: "POST" });
+      if (!res.ok) return;
+      await loadGraph();
+      setSelectedNode(null);
+      setSelectedEdge(null);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }, [historyBusy, historyState.canRedo, loadGraph]);
+
+  const performClearHistory = useCallback(async () => {
+    if (historyBusy || (!historyState.canUndo && !historyState.canRedo)) return;
+    const ok = window.confirm(
+      "Clear undo/redo history? This cannot be undone."
+    );
+    if (!ok) return;
+
+    setHistoryBusy(true);
+    try {
+      const res = await fetch("/api/graph/history/clear", { method: "POST" });
+      if (!res.ok) return;
+      await refreshHistoryState();
+    } finally {
+      setHistoryBusy(false);
+    }
+  }, [historyBusy, historyState.canRedo, historyState.canUndo, refreshHistoryState]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const target = event.target;
+      const tagName = target?.tagName?.toLowerCase();
+      const inEditable =
+        tagName === "input" ||
+        tagName === "textarea" ||
+        target?.isContentEditable;
+      if (inEditable) return;
+
+      const isMeta = event.metaKey || event.ctrlKey;
+      if (!isMeta) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "z" && event.shiftKey) {
+        event.preventDefault();
+        void performRedo();
+      } else if (key === "z") {
+        event.preventDefault();
+        void performUndo();
+      } else if (key === "y") {
+        event.preventDefault();
+        void performRedo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [performRedo, performUndo]);
 
   const onNodeDragStop = useCallback(
     (_event, _node, draggedNodes) => {
@@ -225,6 +385,14 @@ export default function Flow() {
       >
         <Background />
         <Controls />
+        <HistoryPanel
+          canUndo={historyState.canUndo}
+          canRedo={historyState.canRedo}
+          busy={historyBusy}
+          onUndo={performUndo}
+          onRedo={performRedo}
+          onClear={performClearHistory}
+        />
         <AddNodePanel onCreateAt={createNodeAtPosition} />
       </ReactFlow>
 
@@ -233,6 +401,7 @@ export default function Flow() {
           nodeId={selectedNode.id}
           nodeLabel={selectedNode.label}
           onClose={() => setSelectedNode(null)}
+          onMutated={refreshHistoryState}
         />
       )}
 

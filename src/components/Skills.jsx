@@ -69,18 +69,90 @@ function skillToForm(s) {
 function templatePlaceholders(tmpl) {
   if (typeof tmpl !== "string") return [];
   const names = [];
+  const pythonJsonDumpsArgRe =
+    /^\s*json\.dumps\(\s*([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*)\s*(?:,|\))/;
   const doubleRe = /\{\{\s*([^}]+?)\s*\}\}/g;
+  const dottedNameRe = /^[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*$/;
   let m;
   while ((m = doubleRe.exec(tmpl)) !== null) {
-    const name = m[1].trim();
-    if (name && /^[a-zA-Z_]\w*$/.test(name)) names.push(name);
+    const token = m[1].trim();
+    if (token && dottedNameRe.test(token)) {
+      names.push(token);
+      continue;
+    }
+    const jsonDumpsMatch = token.match(pythonJsonDumpsArgRe);
+    if (jsonDumpsMatch) names.push(jsonDumpsMatch[1]);
   }
-  const singleRe = /\{(\s*[a-zA-Z_]\w*\s*)\}/g;
+  const singleRe = /\{(\s*[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*\s*)\}/g;
   while ((m = singleRe.exec(tmpl)) !== null) {
     const name = m[1].trim();
     if (name && !names.includes(name)) names.push(name);
   }
+  const singleExprRe = /\{([^{}]+)\}/g;
+  while ((m = singleExprRe.exec(tmpl)) !== null) {
+    const token = m[1].trim();
+    const jsonDumpsMatch = token.match(pythonJsonDumpsArgRe);
+    if (!jsonDumpsMatch) continue;
+    const name = jsonDumpsMatch[1];
+    if (name && !names.includes(name)) names.push(name);
+  }
   return [...new Set(names)];
+}
+
+function isJsonLikeVariable(variable) {
+  const dt = String(variable?.data_type || "").toLowerCase();
+  return dt.includes("json") || dt === "object" || dt === "dict" || dt === "map";
+}
+
+/**
+ * For placeholders like "payload.user_id", map back to root variable "payload"
+ * when that root variable is JSON-like.
+ */
+function resolvePlaceholdersToVariableNames(placeholders, vars) {
+  const byName = new Map(vars.map((v) => [v.name, v]));
+  const resolved = [];
+  for (const p of placeholders) {
+    if (byName.has(p)) {
+      resolved.push(p);
+      continue;
+    }
+    if (!p.includes(".")) continue;
+    const root = p.split(".")[0];
+    const rootVar = byName.get(root);
+    if (!rootVar) continue;
+    if (!isJsonLikeVariable(rootVar)) continue;
+    resolved.push(root);
+  }
+  return [...new Set(resolved)];
+}
+
+function placeholderUsageCounts(placeholders, vars) {
+  const byName = new Map(vars.map((v) => [v.name, v]));
+  const counts = new Map();
+  for (const p of placeholders) {
+    let resolved = null;
+    if (byName.has(p)) {
+      resolved = p;
+    } else if (p.includes(".")) {
+      const root = p.split(".")[0];
+      const rootVar = byName.get(root);
+      if (rootVar && isJsonLikeVariable(rootVar)) resolved = root;
+    }
+    if (!resolved) continue;
+    counts.set(resolved, (counts.get(resolved) || 0) + 1);
+  }
+  return counts;
+}
+
+function findUnknownPlaceholders(placeholders, vars) {
+  const byName = new Map(vars.map((v) => [v.name, v]));
+  return placeholders.filter((p) => {
+    if (byName.has(p)) return false;
+    if (!p.includes(".")) return true;
+    const root = p.split(".")[0];
+    const rootVar = byName.get(root);
+    return !(rootVar && isJsonLikeVariable(rootVar));
+  });
 }
 
 function findMatchingBrace(s, startIdx) {
@@ -239,7 +311,43 @@ function parsePythonFnReturnKeys(code) {
   if (!defMatch) {
     return { ok: false, keys: [], error: "Code must define def execute(...)" };
   }
-  const body = code.slice(defMatch.index + defMatch[0].length);
+  const defStart = defMatch.index;
+  const defLineStart = code.lastIndexOf("\n", defStart) + 1;
+  const defIndent = (code.slice(defLineStart, defStart).match(/^\s*/) || [""])[0]
+    .length;
+
+  // Restrict parsing to execute() body only, so nested helper functions
+  // defined after execute do not contribute return keys.
+  const lines = code.split("\n");
+  let executeLineIndex = -1;
+  let offset = 0;
+  for (let idx = 0; idx < lines.length; idx++) {
+    const lineLen = lines[idx].length + 1; // include newline separator
+    if (offset <= defStart && defStart < offset + lineLen) {
+      executeLineIndex = idx;
+      break;
+    }
+    offset += lineLen;
+  }
+
+  let body = "";
+  if (executeLineIndex >= 0) {
+    const bodyLines = [];
+    for (let i = executeLineIndex + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) {
+        bodyLines.push(line);
+        continue;
+      }
+      const indent = (line.match(/^\s*/) || [""])[0].length;
+      if (indent <= defIndent) break;
+      bodyLines.push(line);
+    }
+    body = bodyLines.join("\n");
+  } else {
+    body = code.slice(defMatch.index + defMatch[0].length);
+  }
+
   const keySet = new Set();
   let searchFrom = 0;
   let foundDictReturn = false;
@@ -320,13 +428,19 @@ export default function Skills() {
   const llmOutputKey = llmOutputPlaceholders.join("\0");
 
   const llmMatchedInputNames = useMemo(() => {
-    const varNames = new Set(allVars.map((v) => v.name));
-    return llmPromptState.inputPlaceholders.filter((p) => varNames.has(p));
+    return resolvePlaceholdersToVariableNames(llmPromptState.inputPlaceholders, allVars);
+  }, [llmInputKey, allVars]);
+
+  const llmInputUsageCounts = useMemo(() => {
+    return placeholderUsageCounts(llmPromptState.inputPlaceholders, allVars);
   }, [llmInputKey, allVars]);
 
   const llmMatchedOutputNames = useMemo(() => {
-    const varNames = new Set(allVars.map((v) => v.name));
-    return llmPromptState.outputPlaceholders.filter((p) => varNames.has(p));
+    return resolvePlaceholdersToVariableNames(llmPromptState.outputPlaceholders, allVars);
+  }, [llmOutputKey, allVars]);
+
+  const llmOutputUsageCounts = useMemo(() => {
+    return placeholderUsageCounts(llmPromptState.outputPlaceholders, allVars);
   }, [llmOutputKey, allVars]);
 
   const llmMatchedInputKey = llmMatchedInputNames.join("\0");
@@ -465,9 +579,8 @@ export default function Skills() {
         output_format: form.outputFormat || "",
       };
 
-      const varSet = new Set(allVars.map((v) => v.name));
       const inputPh = templatePlaceholders(form.promptTemplate);
-      const unknownIn = inputPh.filter((p) => !varSet.has(p));
+      const unknownIn = findUnknownPlaceholders(inputPh, allVars);
       if (unknownIn.length > 0) {
         setError(
           `Each {name} in prompt_template must match a defined variable. Not found: ${unknownIn.join(", ")}`
@@ -475,7 +588,7 @@ export default function Skills() {
         return;
       }
       const outputPh = templatePlaceholders(form.outputFormat);
-      const unknownOut = outputPh.filter((p) => !varSet.has(p));
+      const unknownOut = findUnknownPlaceholders(outputPh, allVars);
       if (unknownOut.length > 0) {
         setError(
           `Each {name} in output_format must match a defined variable. Not found: ${unknownOut.join(", ")}`
@@ -671,6 +784,7 @@ export default function Skills() {
                 const selected = form.inputVars.includes(v.name);
                 const isLlm = form.type === "llm_call";
                 const disabled = isLlm && !llmAllowedInputSet.has(v.name);
+                const useCount = isLlm ? llmInputUsageCounts.get(v.name) || 0 : 0;
                 return (
                   <button
                     key={v.name}
@@ -678,9 +792,16 @@ export default function Skills() {
                     className={`sk-var-chip ${selected ? "sk-var-chip-active" : ""} ${disabled ? "sk-var-chip-disabled" : ""}`}
                     onClick={() => toggleVar(v.name, "input")}
                     disabled={disabled}
-                    title={disabled ? `Add {${v.name}} to prompt_template to enable` : ""}
+                    title={
+                      disabled
+                        ? `Add {${v.name}} to prompt_template to enable`
+                        : useCount > 1
+                          ? `Used ${useCount} times in prompt_template`
+                          : ""
+                    }
                   >
                     {v.name}
+                    {useCount > 1 && <span className="sk-var-chip-type">{useCount}x</span>}
                     <span className="sk-var-chip-type">{v.data_type}</span>
                   </button>
                 );
@@ -717,6 +838,7 @@ export default function Skills() {
                 const selected = form.outputVars.includes(v.name);
                 const isLlm = form.type === "llm_call";
                 const isPython = form.type === "python_fn";
+                const useCount = isLlm ? llmOutputUsageCounts.get(v.name) || 0 : 0;
                 const disabled =
                   (isLlm && !llmAllowedOutputSet.has(v.name)) ||
                   (isPython && !pythonAllowedOutputSet.has(v.name));
@@ -732,9 +854,16 @@ export default function Skills() {
                     className={`sk-var-chip ${selected ? "sk-var-chip-active" : ""} ${disabled ? "sk-var-chip-disabled" : ""}`}
                     onClick={() => toggleVar(v.name, "output")}
                     disabled={disabled}
-                    title={disabledTitle}
+                    title={
+                      disabled
+                        ? disabledTitle
+                        : isLlm && useCount > 1
+                          ? `Used ${useCount} times in output_format`
+                          : ""
+                    }
                   >
                     {v.name}
+                    {isLlm && useCount > 1 && <span className="sk-var-chip-type">{useCount}x</span>}
                     <span className="sk-var-chip-type">{v.data_type}</span>
                   </button>
                 );
